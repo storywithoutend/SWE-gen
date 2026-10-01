@@ -285,6 +285,7 @@ src/swegen/
 │   ├── claude_code_utils.py    # Claude Code utilities
 │   ├── pi_cli.py               # Pi JSON-mode subprocess adapter
 │   ├── pi_runner.py            # Pi completion integration and backend dispatch
+│   ├── harbor_pi_agent.py      # Pi OAuth bridge for sandboxed Harbor agents
 │   ├── task_reference.py   # Cache successful tasks for reuse
 │   ├── diff_utils.py       # Git diff utilities
 │   └── utils.py            # Utility functions and test file detection

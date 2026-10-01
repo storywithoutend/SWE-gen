@@ -90,6 +90,19 @@ The adapter runs Pi in isolated, non-interactive JSON mode with sessions, extens
 skills, prompt templates, and ambient context files disabled. Task completion enables only
 Pi's file and shell tools. PR evaluation runs with no tools.
 
+Harbor's optional quality checker runs its agent inside a sandbox. Use SWE-gen's Harbor
+adapter to copy the host Pi OAuth session into that sandbox for the duration of the check:
+
+```bash
+uv run harbor check path/to/task \
+  --agent swegen.harbor_pi_agent:PiOAuthAgent \
+  --model openai-codex/gpt-5.5 \
+  --agent-kwarg thinking=high
+```
+
+The credential copy is mode `0600` and is deleted when the agent finishes. Override the
+host credential path with `--agent-kwarg auth_file=/path/to/auth.json` when needed.
+
 ## Usage
 
 **Commands:**
