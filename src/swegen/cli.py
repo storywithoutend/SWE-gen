@@ -10,13 +10,13 @@ from dotenv import load_dotenv
 from harbor.models.environment_type import EnvironmentType
 from rich.console import Console
 
-from swegen.config import CreateConfig, FarmConfig, PublishConfig
-from swegen.create import MissingIssueError, TrivialPRError
-from swegen.create.create import run_reversal
-from swegen.farm import StreamFarmer
 from swegen.analyze import AnalyzeArgs, run_analyze
 from swegen.analyze.classifier import VERDICT_MODEL
-from swegen.create.claude_code_runner import ClaudeRateLimitError
+from swegen.config import CreateConfig, FarmConfig, PublishConfig
+from swegen.create import MissingIssueError, TrivialPRError
+from swegen.create.claude_code_runner import AgentRateLimitError
+from swegen.create.create import run_reversal
+from swegen.farm import StreamFarmer
 from swegen.publish import PublishError
 from swegen.tools.validate import ValidateArgs, run_validate
 from swegen.tools.validate_utils import ValidationError
@@ -104,8 +104,24 @@ def create_cmd(
     pr: int = typer.Option(..., help="PR number"),
     output: Path = typer.Option(Path("tasks"), help="Output root", show_default=True),
     cc_timeout: int = typer.Option(
-        3200, help="Timeout for CC session in seconds (~53 min default)", show_default=True
+        3200,
+        "--agent-timeout",
+        "--cc-timeout",
+        help="Timeout for the completion agent session in seconds (~53 min default)",
+        show_default=True,
     ),
+    completion_agent: str = typer.Option(
+        "claude", help="Coding agent for task completion: claude or pi", show_default=True
+    ),
+    evaluation_agent: str = typer.Option(
+        "openai", help="LLM backend for PR evaluation: openai or pi", show_default=True
+    ),
+    pi_model: str | None = typer.Option(
+        None,
+        help="Pi model/provider pattern (for example openai-codex/gpt-5.5); defaults to Pi settings",
+    ),
+    pi_thinking: str = typer.Option("high", help="Pi thinking level", show_default=True),
+    pi_command: str = typer.Option("pi", help="Pi executable or command", show_default=True),
     validate: bool = typer.Option(
         True, help="Run Harbor validations; --no-validate skips validation"
     ),
@@ -201,11 +217,20 @@ def create_cmd(
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Increase output verbosity"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Reduce output verbosity"),
 ) -> None:
+    if completion_agent not in {"claude", "pi"}:
+        raise typer.BadParameter("--completion-agent must be 'claude' or 'pi'")
+    if evaluation_agent not in {"openai", "pi"}:
+        raise typer.BadParameter("--evaluation-agent must be 'openai' or 'pi'")
     config = CreateConfig(
         repo=repo,
         pr=pr,
         output=output,
         cc_timeout=cc_timeout,
+        completion_agent=completion_agent,
+        evaluation_agent=evaluation_agent,
+        pi_model=pi_model,
+        pi_thinking=pi_thinking,
+        pi_command=pi_command,
         validate=validate,
         force=force,
         state_dir=state_dir,
@@ -240,7 +265,7 @@ def create_cmd(
         ValidationError,
         FileExistsError,
         PublishError,
-        ClaudeRateLimitError,
+        AgentRateLimitError,
     ) as err:
         # These exceptions have already displayed user-friendly messages
         # Exit with error code but don't show traceback
@@ -464,8 +489,24 @@ def farm(
     force: bool = typer.Option(True, help="Regenerate even if task already exists"),
     timeout: int = typer.Option(300, help="Timeout per PR in seconds", show_default=True),
     cc_timeout: int = typer.Option(
-        3200, help="Timeout for Claude Code session in seconds (~53 min default)", show_default=True
+        3200,
+        "--agent-timeout",
+        "--cc-timeout",
+        help="Timeout for the completion agent session in seconds (~53 min default)",
+        show_default=True,
     ),
+    completion_agent: str = typer.Option(
+        "claude", help="Coding agent for task completion: claude or pi", show_default=True
+    ),
+    evaluation_agent: str = typer.Option(
+        "openai", help="LLM backend for PR evaluation: openai or pi", show_default=True
+    ),
+    pi_model: str | None = typer.Option(
+        None,
+        help="Pi model/provider pattern (for example openai-codex/gpt-5.5); defaults to Pi settings",
+    ),
+    pi_thinking: str = typer.Option("high", help="Pi thinking level", show_default=True),
+    pi_command: str = typer.Option("pi", help="Pi executable or command", show_default=True),
     api_delay: float = typer.Option(
         0.5, help="Delay between GitHub API calls in seconds", show_default=True
     ),
@@ -578,6 +619,10 @@ def farm(
     PR immediately, and farm state is committed to a per-repo state branch - so an
     ephemeral sandbox (e.g. Daytona) can die without losing tasks or the resume cursor.
     """
+    if completion_agent not in {"claude", "pi"}:
+        raise typer.BadParameter("--completion-agent must be 'claude' or 'pi'")
+    if evaluation_agent not in {"openai", "pi"}:
+        raise typer.BadParameter("--evaluation-agent must be 'openai' or 'pi'")
     config = FarmConfig(
         repo=repo,
         output=output,
@@ -585,6 +630,11 @@ def farm(
         force=force,
         timeout=timeout,
         cc_timeout=cc_timeout,
+        completion_agent=completion_agent,
+        evaluation_agent=evaluation_agent,
+        pi_model=pi_model,
+        pi_thinking=pi_thinking,
+        pi_command=pi_command,
         api_delay=api_delay,
         task_delay=task_delay,
         build_cache_keep=build_cache_keep,

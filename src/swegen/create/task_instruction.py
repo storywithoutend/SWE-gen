@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from openai import OpenAI
 
+from .claude_code_runner import AgentRateLimitError, is_rate_limit_failure
+from .pi_cli import run_pi
 from .utils import CombinedPRTaskEvaluation, _is_relevant_source
 
 # Repository root inside the task container (Dockerfile WORKDIR / clone target).
@@ -171,26 +174,26 @@ If task name is NOT requested, set task_name to null.
 
 def _sanitize_for_openai(text: str | None) -> str:
     """Sanitize text for OpenAI API calls by replacing problematic Unicode characters.
-    
+
     HTTP headers must be ASCII-only. This function replaces Unicode LINE SEPARATOR
     (U+2028) and PARAGRAPH SEPARATOR (U+2029) which can leak into headers and cause
     UnicodeEncodeError when httpx tries to encode them as ASCII.
-    
+
     Args:
         text: Input text that may contain problematic Unicode characters (can be None)
-        
+
     Returns:
         Sanitized text with U+2028 replaced by '\n' and U+2029 replaced by '\n\n'
         Returns empty string if input is None or not a string
     """
     if not isinstance(text, str):
         return ""
-    
+
     # Replace LINE SEPARATOR (U+2028) with newline
-    text = text.replace('\u2028', '\n')
+    text = text.replace("\u2028", "\n")
     # Replace PARAGRAPH SEPARATOR (U+2029) with double newline
-    text = text.replace('\u2029', '\n\n')
-    
+    text = text.replace("\u2029", "\n\n")
+
     return text
 
 
@@ -260,26 +263,30 @@ def _format_user_prompt(
     # mention test files in the instruction since the agent won't see them
     test_section = ""
     if test_contents and len(test_contents) > 0:
-        test_lines = ["Test Files (for understanding behavior - do NOT reference these in your instruction):"]
+        test_lines = [
+            "Test Files (for understanding behavior - do NOT reference these in your instruction):"
+        ]
         total_length = 0
-        
+
         # Sort by file size (smaller first) to prioritize including more files
         sorted_tests = sorted(test_contents.items(), key=lambda x: len(x[1]))
-        
+
         for test_file, content in sorted_tests:
             # Truncate individual file if too long
             if len(content) > MAX_TEST_FILE_LENGTH:
                 content = content[:MAX_TEST_FILE_LENGTH] + "\n... (truncated)"
-            
+
             # Check if adding this file would exceed total limit
             if total_length + len(content) > MAX_TOTAL_TEST_LENGTH:
-                test_lines.append(f"\n... ({len(test_contents) - len(test_lines) + 1} more test files omitted)")
+                test_lines.append(
+                    f"\n... ({len(test_contents) - len(test_lines) + 1} more test files omitted)"
+                )
                 break
-            
+
             test_lines.append(f"\n--- {test_file} ---")
             test_lines.append(content)
             total_length += len(content)
-        
+
         test_section = "\n".join(test_lines) + "\n\n"
 
     # Net-new files the agent must create. These are REQUIRED in the instruction as absolute
@@ -329,7 +336,7 @@ def _format_user_prompt(
         pr_body_truncated = (pr_body or "").strip()
         if len(pr_body_truncated) > MAX_PR_BODY_LENGTH:
             pr_body_truncated = pr_body_truncated[:MAX_PR_BODY_LENGTH] + "\n...(truncated)"
-        
+
         pr_body_section = ""
         if pr_body_truncated:
             pr_body_section = f"PR Description (for additional context):\n{pr_body_truncated}\n\n"
@@ -363,6 +370,81 @@ def _format_user_prompt(
     )
 
 
+def _extract_json_object(text: str) -> str:
+    """Extract one JSON object from a plain or fenced Pi response."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start < 0 or end < start:
+        raise RuntimeError("Pi returned no JSON object")
+    return stripped[start : end + 1]
+
+
+def _validate_evaluation(result: CombinedPRTaskEvaluation) -> CombinedPRTaskEvaluation:
+    if result.is_substantial:
+        if len(result.tags) < 1:
+            raise RuntimeError(f"LLM generated only {len(result.tags)} tags")
+        if not result.instruction or len(result.instruction.strip()) < MIN_INSTRUCTION_LENGTH:
+            length = len(result.instruction) if result.instruction else 0
+            raise RuntimeError(
+                f"Instruction too short: {length} chars (need {MIN_INSTRUCTION_LENGTH}+)"
+            )
+        if not result.difficulty:
+            result.difficulty = "medium"
+        if not result.category:
+            result.category = "bugfix"
+    return result
+
+
+def _evaluate_with_pi(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None,
+    thinking: str,
+    command: str,
+    timeout: int,
+) -> CombinedPRTaskEvaluation:
+    schema_instruction = """
+Return only one JSON object with exactly these fields:
+{
+  "is_substantial": boolean,
+  "reason": string,
+  "instruction": string or null,
+  "difficulty": "easy" or "medium" or "hard",
+  "category": string,
+  "tags": array of exactly three strings,
+  "task_name": string or null
+}
+Do not wrap the object in Markdown and do not include commentary before or after it.
+"""
+    pi_result = run_pi(
+        prompt=user_prompt + schema_instruction,
+        cwd=Path.cwd(),
+        timeout=timeout,
+        executable=command,
+        model=model,
+        thinking=thinking,
+        tools=None,
+        system_prompt=system_prompt,
+    )
+    if pi_result.error:
+        if is_rate_limit_failure(pi_result.error):
+            raise AgentRateLimitError(pi_result.error)
+        raise RuntimeError(f"Pi evaluation failed: {pi_result.error}")
+    try:
+        return CombinedPRTaskEvaluation.model_validate_json(_extract_json_object(pi_result.text))
+    except Exception as exc:
+        raise RuntimeError(f"Pi returned an invalid evaluation: {exc}") from exc
+
+
 def evaluate_and_generate_task(
     metadata: dict,
     files: list[dict],
@@ -373,6 +455,11 @@ def evaluate_and_generate_task(
     force_generate_instruction: bool = False,
     test_contents: dict[str, str] | None = None,
     generate_task_name: bool = False,
+    backend: str = "openai",
+    pi_model: str | None = None,
+    pi_thinking: str = "high",
+    pi_command: str = "pi",
+    pi_timeout: int = 300,
 ) -> CombinedPRTaskEvaluation:
     """Evaluate PR substantiality and generate task description in one LLM call.
 
@@ -397,8 +484,9 @@ def evaluate_and_generate_task(
     """
     logger = logging.getLogger("swegen")
 
-    # Check API key
-    if not (api_key or os.getenv("OPENAI_API_KEY")):
+    if backend not in {"openai", "pi"}:
+        raise ValueError(f"Unknown evaluation agent: {backend!r}; expected 'openai' or 'pi'")
+    if backend == "openai" and not (api_key or os.getenv("OPENAI_API_KEY")):
         raise RuntimeError("OPENAI_API_KEY not set")
 
     # Prepare prompt data
@@ -419,7 +507,7 @@ def evaluate_and_generate_task(
         and f.get("filename")
         and _is_relevant_source(f.get("filename", ""))
     ]
-    
+
     # Sanitize linked issues if present
     sanitized_linked_issues = None
     if linked_issues:
@@ -429,13 +517,12 @@ def evaluate_and_generate_task(
             sanitized_issue["title"] = _sanitize_for_openai(issue.get("title", ""))
             sanitized_issue["body"] = _sanitize_for_openai(issue.get("body", ""))
             sanitized_linked_issues.append(sanitized_issue)
-    
+
     # Sanitize test contents if present
     sanitized_test_contents = None
     if test_contents:
         sanitized_test_contents = {
-            path: _sanitize_for_openai(content) 
-            for path, content in test_contents.items()
+            path: _sanitize_for_openai(content) for path, content in test_contents.items()
         }
 
     user_prompt = _format_user_prompt(
@@ -450,59 +537,42 @@ def evaluate_and_generate_task(
         new_source_files=new_source_files,
     )
 
-    client = OpenAI(
-        api_key=api_key or os.getenv("OPENAI_API_KEY"),
-        timeout=OPENAI_API_TIMEOUT,  # Longer timeout for reasoning models
-    )
-
     try:
-        # Sanitize prompts to remove Unicode characters that break HTTP headers
-        # (U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR)
         sanitized_system_prompt = _sanitize_for_openai(COMBINED_SYSTEM_PROMPT)
         sanitized_user_prompt = _sanitize_for_openai(user_prompt)
-        
-        # Use structured outputs with parse() method - type-safe!
-        completion = client.beta.chat.completions.parse(
-            model=model,
-            messages=[
-                {"role": "system", "content": sanitized_system_prompt},
-                {"role": "user", "content": sanitized_user_prompt},
-            ],
-            response_format=CombinedPRTaskEvaluation,
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            # reasoning_effort="low", # TODO: reasoning level?
-        )
-
-        result = completion.choices[0].message.parsed
-        if result is None:
-            raise RuntimeError("LLM returned no parsed result")
+        if backend == "pi":
+            result = _evaluate_with_pi(
+                system_prompt=sanitized_system_prompt,
+                user_prompt=sanitized_user_prompt,
+                model=pi_model,
+                thinking=pi_thinking,
+                command=pi_command,
+                timeout=pi_timeout,
+            )
+        else:
+            client = OpenAI(
+                api_key=api_key or os.getenv("OPENAI_API_KEY"),
+                timeout=OPENAI_API_TIMEOUT,
+            )
+            completion = client.beta.chat.completions.parse(
+                model=model,
+                messages=[
+                    {"role": "system", "content": sanitized_system_prompt},
+                    {"role": "user", "content": sanitized_user_prompt},
+                ],
+                response_format=CombinedPRTaskEvaluation,
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+            )
+            result = completion.choices[0].message.parsed
+            if result is None:
+                raise RuntimeError("LLM returned no parsed result")
 
         logger.debug(
-            f"Combined evaluation: is_substantial={result.is_substantial}, reason={result.reason[:DEBUG_REASON_TRUNCATE_LENGTH]}..."
+            "Combined evaluation: is_substantial=%s, reason=%s...",
+            result.is_substantial,
+            result.reason[:DEBUG_REASON_TRUNCATE_LENGTH],
         )
-
-        # Post-process: validate tags if substantial
-        if result.is_substantial:
-            if len(result.tags) < 1:
-                logger.error(f"❌ LLM generated only {len(result.tags)} tags")
-                raise RuntimeError(f"LLM generated only {len(result.tags)} tags")
-
-            # Validate instruction length
-            if not result.instruction or len(result.instruction.strip()) < MIN_INSTRUCTION_LENGTH:
-                logger.error(
-                    f"❌ LLM generated instruction too short: {len(result.instruction) if result.instruction else 0} chars"
-                )
-                raise RuntimeError(
-                    f"Instruction too short: {len(result.instruction) if result.instruction else 0} chars (need {MIN_INSTRUCTION_LENGTH}+)"
-                )
-
-            # Ensure defaults
-            if not result.difficulty:
-                result.difficulty = "medium"
-            if not result.category:
-                result.category = "bugfix"
-
-        return result
+        return _validate_evaluation(result)
 
     except Exception as exc:
         # Log the specific exception type for better debugging

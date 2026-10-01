@@ -8,14 +8,14 @@ SWE-gen CLI automates the creation of [Harbor](https://github.com/laude-institut
 
 1. Takes a merged GitHub PR that fixes a bug
 2. Reverses the PR to recreate the buggy state
-3. Uses Claude Code to detect language and complete the task skeleton
+3. Uses Claude Code or Pi to detect language and complete the task skeleton
 4. Validates that tests fail on the buggy baseline (NOP agent)
 5. Validates that tests pass after applying the fix (Oracle agent)
 6. Produces a fully containerized, reproducible evaluation task
 
 **Supported Languages:** Any language (Python, JavaScript, TypeScript, Go, Rust, Ruby, Java, etc.)
 
-The pipeline is **language-agnostic** - Claude Code analyzes the repository to automatically detect the language, runtime, build system, and test framework.
+The pipeline is **language-agnostic** - the configured completion agent analyzes the repository to automatically detect the language, runtime, build system, and test framework.
 
 ## Installation
 
@@ -27,9 +27,9 @@ uv pip install -e .
 - Python 3.12+
 - Docker
 - uv
-- [Claude Code CLI](https://github.com/anthropics/claude-code)
+- [Claude Code CLI](https://github.com/anthropics/claude-code), or [Pi](https://pi.dev)
 - GitHub token (for API access)
-- OpenAI API key (for PR evaluation)
+- OpenAI API key for the default evaluator, or Pi authentication with `--evaluation-agent pi`
 
 **Environment variables (.env):**
 ```bash
@@ -50,7 +50,10 @@ swegen create --repo <owner/repo> --pr <number>
 ```
 
 Key options:
-- `--cc-timeout`: Timeout for Claude Code session in seconds (default: 3200)
+- `--agent-timeout` / `--cc-timeout`: Timeout for the completion agent (default: 3200)
+- `--completion-agent`: `claude` or `pi`
+- `--evaluation-agent`: `openai` or `pi`
+- `--pi-model`, `--pi-thinking`, `--pi-command`: Pi runtime selection
 - `--no-validate`: Skip Harbor validation
 - `--no-require-issue`: Allow PRs without linked issues
 - `--no-require-minimum-difficulty`: Skip 3+ file requirement
@@ -280,6 +283,8 @@ src/swegen/
 │   ├── task_instruction.py # PR evaluation and instruction generation
 │   ├── claude_code_runner.py   # Claude Code integration
 │   ├── claude_code_utils.py    # Claude Code utilities
+│   ├── pi_cli.py               # Pi JSON-mode subprocess adapter
+│   ├── pi_runner.py            # Pi completion integration and backend dispatch
 │   ├── task_reference.py   # Cache successful tasks for reuse
 │   ├── diff_utils.py       # Git diff utilities
 │   └── utils.py            # Utility functions and test file detection
@@ -331,22 +336,22 @@ The pipeline uses a **single flow** that works for any language:
    - `task.toml` - task metadata
    - `solution/fix.patch` - the actual fix
    - `solution/solve.sh` - applies fix.patch
-8. **Run Claude Code** to complete skeleton:
+8. **Run the configured completion agent** (Claude Code or Pi) to complete the skeleton:
    - Detect language and runtime
    - Fill in Dockerfile (runtime, packages, deps, build steps)
    - Fill in test.sh (correct test command for specific files)
    - Run Harbor validation and iterate until passing
 9. **Save task reference** for future PRs from same repo
 
-### Claude Code Integration
+### Completion Agent Integration
 
-Claude Code is **required** for all tasks. It receives a detailed prompt with:
+Claude Code is the default; Pi is selected with `--completion-agent pi`. Both receive the same detailed prompt with:
 - Repository path and context
 - Skeleton files with TODO markers
 - Test file list
 - Instructions for detection and validation
 
-Claude Code:
+The completion agent:
 1. Analyzes the repo to detect language, package manager, test framework
 2. Fills in the Dockerfile TODOs (runtime, packages, deps, build, post-patch rebuild)
 3. Fills in test.sh with the correct test command for specific files
@@ -479,7 +484,8 @@ All configuration is done via dataclasses in `config.py`:
 - **PublishConfig** - Dataset repo, token, branch/path naming (None disables publishing)
 
 Key defaults:
-- Claude Code always used for task completion
+- Claude Code is the default completion agent; Pi is optional
+- OpenAI is the default PR evaluator; Pi is optional and can use subscription authentication
 - Minimum 3 source files required for task generation (configurable via `--min-source-files`)
 - Maximum 10 source files to avoid large refactors (configurable via `--max-source-files`)
 - Linked issue required for high-quality instructions (disable with `--no-require-issue`)

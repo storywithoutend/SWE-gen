@@ -18,14 +18,17 @@ from swegen.create.claude_code_utils import Colors, print_sdk_message
 from swegen.tools.harbor_runner import parse_harbor_outcome
 
 
-class ClaudeRateLimitError(RuntimeError):
-    """Claude Code hit an Anthropic rate / usage limit.
+class AgentRateLimitError(RuntimeError):
+    """The configured coding agent hit a provider rate or usage limit.
 
     Fatal for farming: every subsequent task draws from the same limit and fails the same
-    way until the token/account is swapped, so there is no point spending a Claude Code
-    session per PR. The farm stops instead. The task's source PR is left unprocessed so it
-    is farmed on a re-run with a fresh token.
+    way until the credential or account is swapped. The source PR remains unprocessed so
+    it can be farmed on a later run.
     """
+
+
+# Backward-compatible import name for callers built against the Claude-only implementation.
+ClaudeRateLimitError = AgentRateLimitError
 
 
 # Substrings (lowercased) that mark a Claude Code failure as a rate/usage limit rather than
@@ -36,7 +39,7 @@ _RATE_LIMIT_MARKERS = ("rate_limit_event", "rate limit", "rate_limited", "usage 
 
 
 def is_rate_limit_failure(error_message: str | None) -> bool:
-    """True if a Claude Code error message indicates an Anthropic rate/usage limit."""
+    """True if an agent error indicates a provider rate or usage limit."""
     if not error_message:
         return False
     lowered = error_message.lower()
@@ -942,21 +945,21 @@ async def _run_claude_code_session_async(
             permission_mode="bypassPermissions",  # Auto-approve actions
             cwd=os.getcwd(),  # Run from project root
             model="claude-opus-4-8",  # Use Opus 4.8
-            hooks={
-                "PreToolUse": [HookMatcher(matcher="Bash", hooks=[log_harbor_runs])]
-            } if verbose else {},
+            hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[log_harbor_runs])]}
+            if verbose
+            else {},
         )
 
         # Run with timeout
         try:
             async with asyncio.timeout(timeout):
                 response_parts = []
-                
+
                 if verbose:
                     # Stream messages with real-time display
                     async for message in query(prompt=prompt_text, options=options):
                         print_sdk_message(message)
-                        
+
                         # Collect text for final result
                         if isinstance(message, AssistantMessage):
                             for block in message.content:

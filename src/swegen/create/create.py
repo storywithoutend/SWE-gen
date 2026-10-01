@@ -18,17 +18,13 @@ from rich.traceback import install as rich_traceback_install
 
 from swegen.config import CreateConfig
 from swegen.publish import PublishContext, PublishError, PublishResult, TaskSink, build_task_sink
-from swegen.tools.harbor_runner import parse_harbor_outcome, run_harbor_agent
+from swegen.tools.harbor_runner import run_harbor_agent
 from swegen.tools.policy import find_test_network_violations, format_violations
 from swegen.tools.validate_utils import ValidationError, run_nop_oracle
 
 from . import MissingIssueError, PRToHarborPipeline, TrivialPRError
-from .claude_code_runner import (
-    ClaudeCodeResult,
-    ClaudeRateLimitError,
-    is_rate_limit_failure,
-    run_claude_code_session,
-)
+from .claude_code_runner import AgentRateLimitError, ClaudeCodeResult, is_rate_limit_failure
+from .pi_runner import run_completion_agent
 from .repo_cache import RepoCache
 from .task_reference import TaskReferenceStore
 
@@ -288,7 +284,7 @@ def _save_state_record(
         }
         with open(state_file, "a") as f:
             f.write(json.dumps(rec) + "\n")
-    except (OSError, IOError, PermissionError, ValueError) as e:
+    except (OSError, PermissionError, ValueError) as e:
         # Non-fatal; log but continue
         logger.warning(f"Failed to save state record for {repo_key}: {e}")
     except Exception as e:
@@ -692,6 +688,11 @@ def run_reversal(config: CreateConfig) -> str | None:
                     environment=config.environment.value,
                     generate_task_name=config.generate_name,
                     enforce_offline_tests=config.enforce_offline_tests,
+                    completion_agent=config.completion_agent,
+                    evaluation_agent=config.evaluation_agent,
+                    pi_model=config.pi_model,
+                    pi_thinking=config.pi_thinking,
+                    pi_command=config.pi_command,
                 )
 
             skeleton_secs = time.perf_counter() - t0
@@ -700,13 +701,14 @@ def run_reversal(config: CreateConfig) -> str | None:
             )
             console.print(f"  [dim]Test files: {len(extracted_test_files)}[/dim]")
 
-            # Step 2: Run CC "make it work" session
+            # Step 2: Run the configured coding agent's "make it work" session
             console.print()
+            agent_label = "Pi" if config.completion_agent == "pi" else "Claude Code"
             if task_reference:
                 console.print(
                     Rule(
                         Text(
-                            f"Claude Code: Adapt from PR #{task_reference.pr_number}",
+                            f"{agent_label}: Adapt from PR #{task_reference.pr_number}",
                             style="bold magenta",
                         )
                     )
@@ -715,13 +717,14 @@ def run_reversal(config: CreateConfig) -> str | None:
                     f"[dim]Reference: {task_reference.task_id} | Timeout: {config.cc_timeout}s | Verbose: {str(verbose).lower()}[/dim]"
                 )
             else:
-                console.print(Rule(Text("Claude Code", style="bold magenta")))
+                console.print(Rule(Text(agent_label, style="bold magenta")))
                 console.print(
                     f"[dim]Timeout: {config.cc_timeout}s | Verbose: {str(verbose).lower()}[/dim]"
                 )
             console.print()
 
-            cc_result = run_claude_code_session(
+            cc_result = run_completion_agent(
+                config.completion_agent,
                 repo=pipeline.repo,
                 pr_number=pipeline.pr_number,
                 repo_path=repo_path,
@@ -736,6 +739,9 @@ def run_reversal(config: CreateConfig) -> str | None:
                 head_sha=metadata.get("head_sha"),
                 environment=config.environment.value,
                 enforce_offline_tests=config.enforce_offline_tests,
+                pi_model=config.pi_model,
+                pi_thinking=config.pi_thinking,
+                pi_command=config.pi_command,
             )
 
             gen_secs = time.perf_counter() - t0
@@ -744,8 +750,12 @@ def run_reversal(config: CreateConfig) -> str | None:
             # until the token is swapped. Raise so the farm aborts and the PR is left
             # unprocessed for a re-run with a fresh token, rather than reporting the task as
             # a validation failure and moving on.
-            if cc_result and not cc_result.success and is_rate_limit_failure(cc_result.error_message):
-                raise ClaudeRateLimitError(cc_result.error_message or "Claude rate limit")
+            if (
+                cc_result
+                and not cc_result.success
+                and is_rate_limit_failure(cc_result.error_message)
+            ):
+                raise AgentRateLimitError(cc_result.error_message or "Agent rate limit")
 
             if cc_result and cc_result.success:
                 console.print()
@@ -950,14 +960,14 @@ def run_reversal(config: CreateConfig) -> str | None:
             _cleanup_local_task(console, task_dir)
 
         return pr_url
-    except ClaudeRateLimitError as e:
-        # Anthropic rate/usage limit: not this task's fault, and fatal for a farm run.
+    except AgentRateLimitError as e:
+        # Provider rate/usage limit: not this task's fault, and fatal for a farm run.
         console.print(
             Panel(
                 Text(
-                    f"Claude Code hit a rate/usage limit:\n{e}\n\n"
+                    f"The completion agent hit a rate/usage limit:\n{e}\n\n"
                     f"Every task draws from the same limit, so this will not clear until the "
-                    f"token or account is swapped. Re-run with a fresh token.",
+                    f"credential or account is changed. Re-run after restoring access.",
                     style="red",
                 ),
                 title="[red]Claude Rate Limit[/red]",

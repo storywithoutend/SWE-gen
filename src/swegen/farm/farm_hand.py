@@ -13,7 +13,7 @@ from rich.panel import Panel
 
 from swegen.config import CreateConfig, FarmConfig
 from swegen.create import MissingIssueError, TrivialPRError, ValidationError
-from swegen.create.claude_code_runner import ClaudeRateLimitError
+from swegen.create.claude_code_runner import AgentRateLimitError
 from swegen.create.create import publish_existing_task, run_reversal
 from swegen.create.task_reference import TaskReferenceStore
 from swegen.publish import PublishError
@@ -134,8 +134,12 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
     lowered = stderr.lower()
     # Checked first: these wrap git/HTTP/SDK output that would otherwise match the
     # "timeout" or "git" heuristics below.
-    if "claude rate limit" in lowered or "rate_limit_event" in lowered:
-        return "rate_limited", (stderr or "Claude rate limit").replace("\n", " ")
+    if (
+        "agent rate limit" in lowered
+        or "claude rate limit" in lowered
+        or "rate_limit_event" in lowered
+    ):
+        return "rate_limited", (stderr or "Agent rate limit").replace("\n", " ")
     if "publish failed" in lowered:
         return "publish_failed", (stderr or "Publish failed").replace("\n", " ")
     if "trivial" in stderr:
@@ -385,6 +389,11 @@ def _run_reversal_for_pr_impl(
         require_issue=config.require_issue,
         environment=config.environment,
         enforce_offline_tests=config.enforce_offline_tests,
+        completion_agent=config.completion_agent,
+        evaluation_agent=config.evaluation_agent,
+        pi_model=config.pi_model,
+        pi_thinking=config.pi_thinking,
+        pi_command=config.pi_command,
         publish=_publish_for_generation(config),
     )
 
@@ -398,11 +407,11 @@ def _run_reversal_for_pr_impl(
         # Call the pipeline directly instead of using subprocess
         pr_url = run_reversal(create_config)
         success = True
-    except ClaudeRateLimitError as e:
-        # Anthropic rate/usage limit. Not this PR's fault and it will hit every following
-        # task the same way until the token is swapped, so the farmer stops the run and the
-        # PR is left unprocessed for a re-run with a fresh token.
-        error_msg = f"Claude rate limit: {e}"
+    except AgentRateLimitError as e:
+        # Provider rate/usage limit. Not this PR's fault and it will hit every following
+        # task the same way until access is restored, so the farmer stops and leaves the PR
+        # unprocessed for a later run.
+        error_msg = f"Agent rate limit: {e}"
         error_category = "rate_limited"
         success = False
     except PublishError as e:

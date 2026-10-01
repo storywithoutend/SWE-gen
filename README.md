@@ -22,7 +22,7 @@
 
 ## Overview
 
-Automates task creation from real bug fixes in open-source GitHub repos. Works with **any programming language**: Claude Code analyzes the repo to detect language, build system, and test framework.
+Automates task creation from real bug fixes in open-source GitHub repos. Works with **any programming language**: either Claude Code or the [Pi coding agent](https://pi.dev) analyzes the repo to detect language, build system, and test framework.
 
 Each task reverses a merged PR to recreate the buggy state, verifies tests fail on baseline, and pass after applying the fix. Fully containerized with all dependencies installed at build time.
 
@@ -63,6 +63,33 @@ export ANTHROPIC_API_KEY=<api-key>  # or CLAUDE_CODE_OAUTH_TOKEN
 
 **Note:** Cloud sandbox environments (Daytona, E2B, Modal, etc.) require additional API keys.
 
+### Use Pi and subscription authentication
+
+Pi can replace both the OpenAI PR-evaluation call and the Claude Code task-completion
+session. Install Pi, authenticate interactively once, and select a subscription-backed model:
+
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+pi              # run /login and choose ChatGPT Plus/Pro, Claude Pro/Max, or Copilot
+uv sync --frozen # from this fork's checkout
+
+uv run swegen create \
+  --repo axios/axios \
+  --pr 7150 \
+  --evaluation-agent pi \
+  --completion-agent pi \
+  --pi-model openai-codex/gpt-5.5
+```
+
+Pi credentials are read from its normal `~/.pi/agent/auth.json`; no provider API key needs
+to be copied into SWE-gen. `GITHUB_TOKEN` is still required for authenticated GitHub API
+access. Use `--pi-thinking` to select a reasoning level and `--pi-command` when the Pi
+executable is not named `pi` or is not on `PATH`.
+
+The adapter runs Pi in isolated, non-interactive JSON mode with sessions, extensions,
+skills, prompt templates, and ambient context files disabled. Task completion enables only
+Pi's file and shell tools. PR evaluation runs with no tools.
+
 ## Usage
 
 **Commands:**
@@ -82,7 +109,12 @@ swegen create --repo <owner/repo> --pr <num>
 
 - `--output PATH` — Output directory for generated tasks (default: `tasks`)
 - `--state-dir PATH` — State directory for cache/logs (default: `.swegen`)
-- `--cc-timeout N` — Claude Code session timeout in seconds (default: 3200)
+- `--agent-timeout N`, `--cc-timeout N` — Completion-agent timeout in seconds (default: 3200)
+- `--completion-agent TYPE` — Task completion backend: `claude` or `pi` (default: `claude`)
+- `--evaluation-agent TYPE` — PR evaluation backend: `openai` or `pi` (default: `openai`)
+- `--pi-model MODEL` — Pi provider/model pattern; omitted uses Pi's configured default
+- `--pi-thinking LEVEL` — Pi reasoning level (default: `high`)
+- `--pi-command COMMAND` — Pi executable or command (default: `pi`)
 - `--env, -e TYPE` — Environment type: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `gke` (default: `docker`)
 - `--no-validate` — Skip Harbor validations
 - `--force` — Bypass local dedupe and regenerate
@@ -109,7 +141,10 @@ swegen farm fastapi/fastapi
 - `--output PATH` — Output directory for generated tasks (default: `tasks`)
 - `--state-dir PATH` — State directory for cache/logs (default: `.swegen`)
 - `--timeout N` — Timeout per PR in seconds (default: 300)
-- `--cc-timeout N` — Claude Code session timeout (default: 3200)
+- `--agent-timeout N`, `--cc-timeout N` — Completion-agent timeout (default: 3200)
+- `--completion-agent TYPE` — Task completion backend: `claude` or `pi` (default: `claude`)
+- `--evaluation-agent TYPE` — PR evaluation backend: `openai` or `pi` (default: `openai`)
+- `--pi-model MODEL` / `--pi-thinking LEVEL` / `--pi-command COMMAND` — Pi configuration
 - `--task-delay N` — Delay between tasks in seconds (default: 60)
 - `--api-delay N` — Delay between GitHub API calls in seconds (default: 0.5)
 - `--env, -e TYPE` — Environment type: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `gke` (default: `docker`)
@@ -190,10 +225,10 @@ The pipeline uses a **language-agnostic approach**:
 
 1. **Fetch & Analyze** — Get PR metadata via GitHub API, clone repo, identify test files
 2. **Evaluate** — LLM evaluates PR substantiality and generates task instructions
-3. **Generate Skeleton** — Create Dockerfile and test.sh with TODOs for Claude Code
-4. **Claude Code Completion** — CC analyzes repo, detects language/runtime/build system, fills in skeleton
+3. **Generate Skeleton** — Create Dockerfile and test.sh with TODOs for the completion agent
+4. **Agent Completion** — Claude Code or Pi analyzes the repo, detects language/runtime/build system, and fills in the skeleton
 5. **Validation** — Run NOP (reward=0) and Oracle (reward=1) agents
-6. **Iteration** — CC iterates until both agents pass
+6. **Iteration** — The completion agent iterates until both agents pass
 
 **Key Details:**
 - Dockerfile clones at HEAD, then applies `bug.patch` to revert to buggy BASE state

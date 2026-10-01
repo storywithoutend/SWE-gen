@@ -101,6 +101,11 @@ class CreateConfig:
     environment: EnvironmentType = EnvironmentType.DOCKER
     generate_name: bool = False
     enforce_offline_tests: bool = True
+    completion_agent: Literal["claude", "pi"] = "claude"
+    evaluation_agent: Literal["openai", "pi"] = "openai"
+    pi_model: str | None = None
+    pi_thinking: str = "high"
+    pi_command: str = "pi"
     publish: PublishConfig | None = None
     verbose: bool = False
     quiet: bool = False
@@ -175,6 +180,11 @@ class FarmConfig:
     require_issue: bool = True
     validate: bool = True
     enforce_offline_tests: bool = True
+    completion_agent: Literal["claude", "pi"] = "claude"
+    evaluation_agent: Literal["openai", "pi"] = "openai"
+    pi_model: str | None = None
+    pi_thinking: str = "high"
+    pi_command: str = "pi"
     publish: PublishConfig | None = None
 
 

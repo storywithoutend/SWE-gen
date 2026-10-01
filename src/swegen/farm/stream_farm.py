@@ -359,7 +359,10 @@ class StreamFarmer:
             },
             "config": {
                 "environment": str(self.config.environment),
-                "cc_timeout": self.config.cc_timeout,
+                "agent_timeout": self.config.cc_timeout,
+                "completion_agent": self.config.completion_agent,
+                "evaluation_agent": self.config.evaluation_agent,
+                "pi_model": self.config.pi_model,
                 "require_issue": self.config.require_issue,
                 "docker_prune_batch": self.config.docker_prune_batch,
                 "publish_repo": pub.repo if pub else None,
@@ -517,8 +520,8 @@ class StreamFarmer:
 
         # Mark as processed with detailed tracking
         if result.category == "rate_limited":
-            # Do NOT consume the PR. Claude hit a rate/usage limit - nothing was generated,
-            # and a re-run with a fresh token must still farm this PR. Record it (not just
+            # Do NOT consume the PR. The completion agent hit a rate/usage limit, so
+            # nothing was generated and a later run must still farm this PR. Record it (not just
             # skip) so the fetcher exempts it from the resume-time skip; otherwise a PR
             # sharing the cursor's exact created_at would be dropped and never retried.
             # The run aborts below.
@@ -710,7 +713,7 @@ class StreamFarmer:
             failure_summary.append(f"No Issue: {len(self.state.no_issue_prs)}")
         if len(self.state.validation_failed_prs) > 0:
             failure_summary.append(f"Validation: {len(self.state.validation_failed_prs)}")
-        
+
         failure_text = ", ".join(failure_summary[:3]) if failure_summary else "None"
         success_rate = (self.state.successful / self.state.total_processed * 100) if self.state.total_processed > 0 else 0
 
@@ -832,7 +835,7 @@ class StreamFarmer:
         table.add_row("PRs Processed", str(self.state.total_processed))
         table.add_row("Successful", f"[green]{self.state.successful}[/green]")
         table.add_row("Failed", f"[red]{self.state.failed}[/red]")
-        
+
         # Add detailed breakdown
         if self.state.failed > 0:
             table.add_row("", "")  # Spacer

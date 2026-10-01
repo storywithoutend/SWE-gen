@@ -7,18 +7,19 @@ from pathlib import Path
 
 from harbor.models.task.paths import TaskPaths
 
-from .claude_code_runner import ClaudeCodeResult, run_claude_code_session
+from .claude_code_runner import ClaudeCodeResult
 from .diff_utils import extract_test_files, generate_diffs
+from .pi_runner import run_completion_agent
 from .pr_fetcher import GitHubPRFetcher
 from .repo_cache import RepoCache
 from .task_instruction import evaluate_and_generate_task
 from .task_reference import TaskReference, TaskReferenceStore
 from .task_skeleton import (
     SkeletonParams,
-    generate_instruction_md,
-    generate_task_toml,
     generate_dockerfile,
+    generate_instruction_md,
     generate_solve_sh,
+    generate_task_toml,
     generate_test_sh,
 )
 from .utils import check_multi_file_requirement, identify_test_files
@@ -108,9 +109,14 @@ class PRToHarborPipeline:
         environment: str = "docker",
         generate_task_name: bool = False,
         enforce_offline_tests: bool = True,
+        completion_agent: str = "claude",
+        evaluation_agent: str = "openai",
+        pi_model: str | None = None,
+        pi_thinking: str = "high",
+        pi_command: str = "pi",
     ) -> tuple[Path, ClaudeCodeResult | None, list[str], TaskReference | None]:
         """
-        Generate a Harbor task using skeleton + Claude Code.
+        Generate a Harbor task using a skeleton plus the configured completion agent.
 
         This is the language-agnostic pipeline that works for any repository.
         Claude Code analyzes the repo to detect language, runtime, build system,
@@ -245,7 +251,7 @@ class PRToHarborPipeline:
                     if test_file.is_file():
                         try:
                             # Read as text, skip binary files
-                            content = test_file.read_text(encoding='utf-8', errors='ignore')
+                            content = test_file.read_text(encoding="utf-8", errors="ignore")
                             # Store with relative path from tests/ dir
                             rel_path = test_file.relative_to(test_dir)
                             test_contents[str(rel_path)] = content
@@ -263,6 +269,10 @@ class PRToHarborPipeline:
                     force_generate_instruction=(not require_minimum_difficulty),
                     test_contents=test_contents,
                     generate_task_name=generate_task_name,
+                    backend=evaluation_agent,
+                    pi_model=pi_model,
+                    pi_thinking=pi_thinking,
+                    pi_command=pi_command,
                 )
 
                 if not combined_result.is_substantial:
@@ -367,10 +377,12 @@ class PRToHarborPipeline:
                     )
                 else:
                     logger.info(
-                        "Running CC session (will detect language automatically)..."
+                        "Running %s session (will detect language automatically)...",
+                        completion_agent,
                     )
 
-                cc_result = run_claude_code_session(
+                cc_result = run_completion_agent(
+                    completion_agent,
                     repo=self.repo,
                     pr_number=self.pr_number,
                     repo_path=repo_path,
@@ -385,6 +397,9 @@ class PRToHarborPipeline:
                     head_sha=metadata.get("head_sha"),
                     environment=environment,
                     enforce_offline_tests=enforce_offline_tests,
+                    pi_model=pi_model,
+                    pi_thinking=pi_thinking,
+                    pi_command=pi_command,
                 )
 
                 if cc_result.success:
